@@ -1,12 +1,22 @@
 import type { MeshPacket, ProcessResult } from './types';
 
+export interface RouterOptions {
+  nodeId?: string;
+  cacheTtlMs?: number;    // Expiration window for duplicate packet IDs (default: 5 mins)
+  maxCacheSize?: number;  // Bounded cache capacity to prevent memory leaks (default: 500)
+}
+
 export class PacketRouter {
   public readonly myNodeId: string;
-  private seenPacketIds = new Set<string>();
+  // Bounded Map: packetId -> expiration timestamp (ms)
+  private seenCache = new Map<string, number>();
+  private readonly cacheTtlMs: number;
+  private readonly maxCacheSize: number;
 
-  constructor(nodeId?: string) {
-    // Generate a unique 6-character node ID for this device if not provided
-    this.myNodeId = nodeId || 'node-' + Math.random().toString(36).substring(2, 8);
+  constructor(options: RouterOptions = {}) {
+    this.myNodeId = options.nodeId || 'node-' + Math.random().toString(36).substring(2, 8);
+    this.cacheTtlMs = options.cacheTtlMs ?? 5 * 60 * 1000; // 5 minutes
+    this.maxCacheSize = options.maxCacheSize ?? 500;
   }
 
   // Create a new outgoing mesh packet
@@ -15,21 +25,30 @@ export class PacketRouter {
       id: crypto.randomUUID(),
       origin: this.myNodeId,
       destination,
-      ttl: maxHops,
+      ttl: Math.max(1, maxHops),
       hopCount: 0,
       timestamp: Date.now(),
       payload,
     };
 
-    // Mark our own packet as seen so we never re-process it if it bounces back
-    this.seenPacketIds.add(packet.id);
+    // Record our own outgoing packet in the duplicate cache
+    this.markAsSeen(packet.id);
     return packet;
   }
 
-  // Process a packet received from the Bluetooth transport
+  // Process an incoming packet
   processPacket(packet: MeshPacket): ProcessResult {
-    // 1. Check for duplicates
-    if (this.seenPacketIds.has(packet.id)) {
+    // 1. Basic schema sanity check
+    if (!this.isValidPacket(packet)) {
+      return {
+        action: 'DROPPED_TTL_EXPIRED',
+        packet,
+        reason: 'Malformed packet schema.',
+      };
+    }
+
+    // 2. Check for duplicate packet
+    if (this.isDuplicate(packet.id)) {
       return {
         action: 'DROPPED_DUPLICATE',
         packet,
@@ -37,10 +56,19 @@ export class PacketRouter {
       };
     }
 
-    // Add to seen cache
-    this.seenPacketIds.add(packet.id);
+    // 3. Check for expired TTL
+    if (packet.ttl <= 0) {
+      return {
+        action: 'DROPPED_TTL_EXPIRED',
+        packet,
+        reason: 'Packet TTL is 0 or negative.',
+      };
+    }
 
-    // 2. Check if addressed to us or a public broadcast
+    // Record packet as seen now that initial checks passed
+    this.markAsSeen(packet.id);
+
+    // 4. Check if packet is addressed to this node or a public broadcast
     const isForMe = packet.destination === this.myNodeId || packet.destination === '*';
 
     if (isForMe) {
@@ -50,7 +78,7 @@ export class PacketRouter {
       };
     }
 
-    // 3. Not for us -> Check TTL before relaying
+    // 5. Foreign packet -> Check if it has hops remaining to relay
     if (packet.ttl <= 1) {
       return {
         action: 'DROPPED_TTL_EXPIRED',
@@ -59,7 +87,7 @@ export class PacketRouter {
       };
     }
 
-    // 4. Prepare for relay: decrement TTL, increment hop count
+    // 6. Decrement TTL and increment hop count for relay
     const relayedPacket: MeshPacket = {
       ...packet,
       ttl: packet.ttl - 1,
@@ -72,7 +100,23 @@ export class PacketRouter {
     };
   }
 
-  // Serialization helpers for Bluetooth transport
+  // Strict Schema Validation
+  isValidPacket(obj: unknown): obj is MeshPacket {
+    if (!obj || typeof obj !== 'object') return false;
+    const p = obj as Record<string, unknown>;
+
+    return (
+      typeof p.id === 'string' && p.id.trim().length > 0 &&
+      typeof p.origin === 'string' && p.origin.trim().length > 0 &&
+      typeof p.destination === 'string' && p.destination.trim().length > 0 &&
+      typeof p.ttl === 'number' && Number.isInteger(p.ttl) &&
+      typeof p.hopCount === 'number' && Number.isInteger(p.hopCount) && p.hopCount >= 0 &&
+      typeof p.timestamp === 'number' && p.timestamp > 0 &&
+      typeof p.payload === 'string'
+    );
+  }
+
+  // Serialization helpers for transport
   serialize(packet: MeshPacket): string {
     return JSON.stringify(packet);
   }
@@ -80,23 +124,20 @@ export class PacketRouter {
   deserialize(rawString: string): MeshPacket | null {
     try {
       const parsed = JSON.parse(rawString);
-      if (parsed && parsed.id && parsed.origin && parsed.payload) {
-        return parsed as MeshPacket;
-      }
-      return null;
+      return this.isValidPacket(parsed) ? parsed : null;
     } catch {
       return null;
     }
   }
 
-  // Parse incoming Bluetooth payload: handles both JSON MeshPacket and raw fallback text
+  // Parse incoming Bluetooth payload: handles both valid MeshPacket and raw simulator text
   parseIncoming(rawString: string, fallbackOrigin: string = 'phone'): MeshPacket {
     const deserialized = this.deserialize(rawString);
     if (deserialized) {
       return deserialized;
     }
 
-    // If phone simulator sent plain text like "hi", wrap it into a valid MeshPacket
+    // Fallback: wrap raw text from simulator into a valid MeshPacket
     return {
       id: crypto.randomUUID(),
       origin: fallbackOrigin,
@@ -108,8 +149,40 @@ export class PacketRouter {
     };
   }
 
-  // Clear memory cache if needed
+  // Bounded & Expiring Duplicate Cache Management
+  private isDuplicate(packetId: string): boolean {
+    this.evictExpired();
+    return this.seenCache.has(packetId);
+  }
+
+  private markAsSeen(packetId: string): void {
+    // If cache exceeded max size, evict oldest entries
+    if (this.seenCache.size >= this.maxCacheSize) {
+      const oldestKey = this.seenCache.keys().next().value;
+      if (oldestKey) this.seenCache.delete(oldestKey);
+    }
+
+    this.seenCache.set(packetId, Date.now() + this.cacheTtlMs);
+  }
+
+  private evictExpired(): void {
+    const now = Date.now();
+    for (const [id, expiresAt] of this.seenCache.entries()) {
+      if (now > expiresAt) {
+        this.seenCache.delete(id);
+      } else {
+        // Since entries are added sequentially, earlier entries expire first
+        break;
+      }
+    }
+  }
+
+  getSeenCacheSize(): number {
+    this.evictExpired();
+    return this.seenCache.size;
+  }
+
   clearSeenCache(): void {
-    this.seenPacketIds.clear();
+    this.seenCache.clear();
   }
 }

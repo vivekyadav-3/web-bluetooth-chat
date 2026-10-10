@@ -9,7 +9,7 @@ import type { BluetoothConnectionState, ChatMessage } from './types/message';
 import type { ProcessResult } from './mesh/types';
 
 export function App() {
-  const router = useMemo(() => new PacketRouter('my-laptop'), []);
+  const router = useMemo(() => new PacketRouter({ nodeId: 'my-laptop' }), []);
   const [packetLogs, setPacketLogs] = useState<ProcessResult[]>([]);
 
   const [connectionState, setConnectionState] = useState<BluetoothConnectionState>({

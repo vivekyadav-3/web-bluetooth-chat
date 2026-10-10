@@ -19,12 +19,13 @@ The application uses Google Chrome's native **Web Bluetooth API** (Central GATT 
   - **Laptop ➔ Phone:** Encodes text using `TextEncoder` and writes bytes to a writable GATT characteristic.
   - **Phone ➔ Laptop:** Subscribes to notifications via `characteristicvaluechanged` and decodes incoming byte streams with `TextDecoder`.
 - **Fault-Tolerant Connection Handling:** Real-time listeners for `gattserverdisconnected` handle out-of-range signal drops and physical reconnection while preserving chat history in React state.
-- **Experimental Bitchat Mesh Protocol Layer:**
-  - **Structured Packet Envelopes:** Every message carries `id`, `origin`, `destination`, `ttl`, `hopCount`, and `timestamp`.
-  - **Duplicate Suppression:** An in-memory cache drops duplicate packets to prevent broadcast storms and infinite routing loops.
+- **Bitchat-Style Mesh Protocol Layer:**
+  - **Strict Schema Validation:** Validates integer TTLs, hop counts, timestamps, and origin/destination IDs before routing.
+  - **Bounded & Expiring Duplicate Cache:** Prevents broadcast storms with an LRU/time-evicted memory cache rather than an unbounded set.
   - **TTL Loop-Breaker:** Automatically decrements packet Time-To-Live (TTL) on each hop and drops dying packets (`TTL <= 1`).
   - **Hop Counting:** Measures and displays relay distance across hops.
-- **Collapsible Mesh Protocol Debugger:** Built-in live packet inspector and interactive testbed for simulating multi-hop relays, duplicate attacks, and TTL expiration.
+- **Collapsible Mesh Protocol Debugger:** Built-in live packet inspector and interactive testbed for testing multi-hop relays, duplicate attacks, and TTL expiration without cluttering the chat view.
+- **Automated Test Suite:** 12 unit tests verifying routing logic, schema validation, duplicate suppression, and cache bounding using **Vitest**.
 
 ---
 
@@ -34,6 +35,7 @@ The application uses Google Chrome's native **Web Bluetooth API** (Central GATT 
 | :--- | :--- |
 | **Frontend Framework** | React 19 + TypeScript |
 | **Build Tool & Bundler** | Vite |
+| **Test Runner** | Vitest |
 | **Bluetooth Interface** | Web Bluetooth API (`navigator.bluetooth`) |
 | **Type Definitions** | `@types/web-bluetooth` |
 | **Peripheral GATT Server** | Android (nRF Connect for Mobile / BLE Peripheral Simulator) |
@@ -68,6 +70,23 @@ interface MeshPacket {
 
 ---
 
+## 🧪 Automated Testing
+
+Run the automated test suite verifying serialization, duplicate detection, TTL expiry, and bounded cache eviction:
+
+```bash
+npm test
+```
+
+```text
+ ✓ src/mesh/__tests__/packetRouter.test.ts (12 tests) 12ms
+
+ Test Files  1 passed (1)
+      Tests  12 passed (12)
+```
+
+---
+
 ## 🚀 Getting Started
 
 ### 1. Clone & Install
@@ -87,7 +106,7 @@ Open **`http://localhost:5173`** in **Google Chrome** (Web Bluetooth requires Ch
 
 ## 📱 Setting Up the Android Phone Peripheral
 
-To test without hardware microcontrollers, configure a phone to act as the GATT Server:
+To test without hardware microcontrollers, configure an Android phone to act as the GATT Server:
 
 1. Install **nRF Connect for Mobile** (by Nordic Semiconductor) from Google Play.
 2. In the menu (☰), go to **Configure GATT Server**:
@@ -103,11 +122,11 @@ To test without hardware microcontrollers, configure a phone to act as the GATT 
 
 ---
 
-## ⚠️ Current Scope & Known Limitations
+## ⚠️ Security Notice & Known Limitations
 
-- **Central-Only Browser Constraint:** The W3C Web Bluetooth standard only implements the Central client role. Web browsers cannot currently advertise as BLE peripherals; one endpoint must be a native peripheral or simulator.
-- **Physical Multi-Hop Testing:** While the mesh protocol logic (duplicate filter, TTL decrement, hop counting) is verified in code and debugger simulations, real physical relay requires multiple dual-role hardware or native mobile nodes.
-- **Encryption:** Messages are currently transmitted as plain UTF-8 text envelopes; end-to-end encryption (e.g., AES-GCM via Web Crypto API) is planned for future milestones.
+- **Not End-to-End Encrypted (Yet):** Messages are currently transmitted as plain UTF-8 JSON envelopes over Bluetooth. **Do not use this prototype for sensitive, private, or production communication.** Cryptographic signatures and AES-GCM encryption are planned for a subsequent milestone.
+- **Central-Only Browser Constraint:** The W3C Web Bluetooth standard only implements the Central client role. Web browsers cannot advertise as BLE peripherals; one endpoint must be a native peripheral or simulator.
+- **Physical Multi-Hop Scope:** While the mesh protocol logic (duplicate filter, TTL decrement, hop counting) is verified through automated tests and the interactive debugger, real physical forwarding between 3+ hardware devices requires dual-role native mobile nodes.
 
 ---
 
